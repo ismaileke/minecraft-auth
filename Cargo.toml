@@ -1,0 +1,17 @@
+[package]
+name = "minecraft-auth"
+version = "0.1.0"
+description = "Provides the connections needed for the server"
+edition = "2021"
+
+[dependencies]
+reqwest = { version = "0.12.7", features = ["native-tls", "json"] }
+native-tls = "0.2.12"
+tokio = { version = "1.39.3", features = ["full"] }
+serde_json = "1.0.125"
+serde = { version = "1.0.208", features = ["derive"] }
+uuid = { version = "1.10.0", features = ["v4"] }
+openssl = "0.10.66"
+base64 = "0.22.1"
+openssl-sys = "0.9.103"
+chrono = "0.4.38"
