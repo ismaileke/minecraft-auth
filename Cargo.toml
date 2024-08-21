@@ -2,6 +2,8 @@
 name = "minecraft-auth"
 version = "0.1.0"
 description = "Provides the connections needed for the server"
+authors = ["ismaileke"]
+license = "MIT"
 edition = "2021"
 
 [dependencies]

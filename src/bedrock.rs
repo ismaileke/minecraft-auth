@@ -77,15 +77,14 @@ pub struct ChainData {
     chain: Value
 }
 
-
-pub fn new() -> Bedrock {
+pub fn new(debug: bool) -> Bedrock {
     let client = Client::new();
     Bedrock {
         client,
         client_id: "0000000048183522",
         client_version: "1.21.2",
         chain_data: vec!["".to_string(), "".to_string()],
-        debug: false,
+        debug,
     }
 }
 
@@ -156,7 +155,9 @@ impl Bedrock {
             Ok((device_auth, error_response)) => {
                 if let Some(auth) = device_auth {
                     device_token = auth.token;
-                    println!("Device Auth Connect Successful");
+                    if self.debug {
+                        println!("Device Auth Connect Successful");
+                    }
                 }
                 if let Some(err) = error_response {
                     println!(
@@ -183,7 +184,9 @@ impl Bedrock {
                     if xbox_user_id == "UHS not found".to_string() {
                         exit("UHS not found".parse().unwrap());
                     }
-                    println!("Sisu Authorize Successful");
+                    if self.debug {
+                        println!("Sisu Authorize Successful");
+                    }
                 }
                 if let Some(err) = error_response {
                     println!(
@@ -213,7 +216,9 @@ impl Bedrock {
                         eprintln!("Expected a JSON array");
                         return false;
                     }
-                    println!("Minecraft Authorization Successful");
+                    if self.debug {
+                        println!("Minecraft Authorization Successful");
+                    }
                     return true;
                 }
                 if let Some(err) = error_response {
@@ -237,7 +242,7 @@ impl Bedrock {
     pub async fn oauth20_connect(&self) -> Result<(Option<OAuth20Connect>, Option<ErrorResponse>), Error> {
         let mut body = HashMap::new();
         body.insert("client_id", self.client_id);
-        body.insert("scope", "service::user.auth.xboxlive.com::MBI_SSL"); // bunu incele
+        body.insert("scope", "service::user.auth.xboxlive.com::MBI_SSL");
         body.insert("response_type", "device_code");
 
         let response = self
