@@ -20,8 +20,9 @@ use serde::de::StdError;
 pub struct Bedrock {
     client: Client,
     client_id: &'static str,
-    client_version: &'static str,
+    client_version: String,
     chain_data: Vec<String>,
+    pkey: Option<PKey<Private>>,
     debug: bool
 }
 
@@ -77,13 +78,14 @@ pub struct ChainData {
     chain: Value
 }
 
-pub fn new(debug: bool) -> Bedrock {
+pub fn new(client_version: String, debug: bool) -> Bedrock {
     let client = Client::new();
     Bedrock {
         client,
         client_id: "0000000048183522",
-        client_version: "1.21.2",
+        client_version: client_version.clone(),
         chain_data: vec!["".to_string(), "".to_string()],
+        pkey: None,
         debug,
     }
 }
@@ -237,6 +239,10 @@ impl Bedrock {
 
     pub fn get_chain_data(&self) -> Vec<String> {
         self.chain_data.to_vec()
+    }
+
+    pub fn get_pkey(&self) -> Option<PKey<Private>> {
+        self.pkey.clone()
     }
 
     pub async fn oauth20_connect(&self) -> Result<(Option<OAuth20Connect>, Option<ErrorResponse>), Error> {
@@ -528,9 +534,11 @@ impl Bedrock {
         }
     }
 
-    pub async fn minecraft_authentication(&self, xbox_user_id: String, authorization_token: String) -> Result<(Option<ChainData>, Option<ErrorResponse>), Error> {
+    pub async fn minecraft_authentication(&mut self, xbox_user_id: String, authorization_token: String) -> Result<(Option<ChainData>, Option<ErrorResponse>), Error> {
         let group = EcGroup::from_curve_name(Nid::SECP384R1).expect("EC Group Error");
         let ec_key = EcKey::generate(&group).expect("Private Key Error");
+        let pkey = PKey::from_ec_key(ec_key.clone()).expect("PKey Error");
+        self.pkey = Option::from(pkey);
 
         let public_key_pem = ec_key.public_key_to_pem().expect("Public Key PEM Error");
         let public_key_der = pem_to_der(&public_key_pem).expect("Public Key Der Error");
@@ -543,7 +551,7 @@ impl Bedrock {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, "application/json".parse().unwrap());
         headers.insert(USER_AGENT, "MCPE/Android".parse().unwrap());
-        headers.insert("Client-Version", HeaderValue::from_static(self.client_version));
+        headers.insert("Client-Version", HeaderValue::from_str(self.client_version.as_str()).unwrap());
         headers.insert(AUTHORIZATION, format!("XBL3.0 x={};{}", xbox_user_id, authorization_token).as_str().parse().unwrap());
 
         let response = self

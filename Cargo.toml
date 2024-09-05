@@ -9,9 +9,9 @@ edition = "2021"
 [dependencies]
 reqwest = { version = "0.12.7", features = ["native-tls", "json"] }
 native-tls = "0.2.12"
-tokio = { version = "1.39.3", features = ["full"] }
-serde_json = "1.0.125"
-serde = { version = "1.0.208", features = ["derive"] }
+tokio = { version = "1.40.0", features = ["full"] }
+serde_json = "1.0.128"
+serde = { version = "1.0.209", features = ["derive"] }
 uuid = { version = "1.10.0", features = ["v4"] }
 openssl = "0.10.66"
 base64 = "0.22.1"
