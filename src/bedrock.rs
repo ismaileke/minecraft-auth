@@ -538,7 +538,7 @@ impl Bedrock {
         let group = EcGroup::from_curve_name(Nid::SECP384R1).expect("EC Group Error");
         let ec_key = EcKey::generate(&group).expect("Private Key Error");
         //let pkey = PKey::from_ec_key(ec_key.clone()).expect("PKey Error");
-        self.ec_key = Option::from(ec_key);
+        self.ec_key = Option::from(ec_key.clone());
 
         let public_key_pem = ec_key.public_key_to_pem().expect("Public Key PEM Error");
         let public_key_der = pem_to_der(&public_key_pem).expect("Public Key Der Error");
