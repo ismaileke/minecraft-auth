@@ -22,7 +22,7 @@ pub struct Bedrock {
     client_id: &'static str,
     client_version: String,
     chain_data: Vec<String>,
-    pkey: Option<PKey<Private>>,
+    ec_key: Option<EcKey<Private>>,
     debug: bool
 }
 
@@ -85,7 +85,7 @@ pub fn new(client_version: String, debug: bool) -> Bedrock {
         client_id: "0000000048183522",
         client_version: client_version.clone(),
         chain_data: vec!["".to_string(), "".to_string()],
-        pkey: None,
+        ec_key: None,
         debug,
     }
 }
@@ -241,8 +241,8 @@ impl Bedrock {
         self.chain_data.to_vec()
     }
 
-    pub fn get_pkey(&self) -> Option<PKey<Private>> {
-        self.pkey.clone()
+    pub fn get_ec_key(&self) -> Option<EcKey<Private>> {
+        self.ec_key.clone()
     }
 
     pub async fn oauth20_connect(&self) -> Result<(Option<OAuth20Connect>, Option<ErrorResponse>), Error> {
@@ -537,8 +537,8 @@ impl Bedrock {
     pub async fn minecraft_authentication(&mut self, xbox_user_id: String, authorization_token: String) -> Result<(Option<ChainData>, Option<ErrorResponse>), Error> {
         let group = EcGroup::from_curve_name(Nid::SECP384R1).expect("EC Group Error");
         let ec_key = EcKey::generate(&group).expect("Private Key Error");
-        let pkey = PKey::from_ec_key(ec_key.clone()).expect("PKey Error");
-        self.pkey = Option::from(pkey);
+        //let pkey = PKey::from_ec_key(ec_key.clone()).expect("PKey Error");
+        self.ec_key = Option::from(ec_key);
 
         let public_key_pem = ec_key.public_key_to_pem().expect("Public Key PEM Error");
         let public_key_der = pem_to_der(&public_key_pem).expect("Public Key Der Error");

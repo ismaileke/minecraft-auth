@@ -19,7 +19,7 @@ async fn main() {
     let mut bedrock = bedrock::new("1.21.2".to_string(), false); // (client version, debug mode)
     if bedrock.auth().await {
         let chain = bedrock.get_chain_data();
-        let pkey = bedrock.get_pkey().unwrap(); // When sending the Login Packet we will need this
+        let ec_key = bedrock.get_ec_key().unwrap(); // When sending the Login Packet we will need this
         println!("Chain 1: {}\nChain 2: {}", chain[0], chain[1]);
     }
 }
