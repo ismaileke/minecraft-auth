@@ -7,13 +7,13 @@ license = "MIT"
 edition = "2021"
 
 [dependencies]
-reqwest = { version = "0.12.7", features = ["native-tls", "json"] }
+reqwest = { version = "0.12.12", features = ["native-tls", "json"] }
 native-tls = "0.2.12"
-tokio = { version = "1.40.0", features = ["full"] }
-serde_json = "1.0.128"
-serde = { version = "1.0.209", features = ["derive"] }
-uuid = { version = "1.10.0", features = ["v4"] }
-openssl = "0.10.66"
+tokio = { version = "1.43.0", features = ["full"] }
+serde_json = "1.0.135"
+serde = { version = "1.0.217", features = ["derive"] }
+uuid = { version = "1.11.1", features = ["v4"] }
+openssl = "0.10.68"
 base64 = "0.22.1"
-openssl-sys = "0.9.103"
-chrono = "0.4.38"
+openssl-sys = "0.9.104"
+chrono = "0.4.39"
