@@ -23,7 +23,8 @@ pub struct Bedrock {
     client_version: String,
     chain_data: Vec<String>,
     ec_key: Option<EcKey<Private>>,
-    debug: bool
+    debug: bool,
+    auth_callback: Option<Box<dyn Fn(&str, &str) + Send + Sync>>,
 }
 
 #[derive(Deserialize)]
@@ -87,10 +88,18 @@ pub fn new(client_version: String, debug: bool) -> Bedrock {
         chain_data: vec!["".to_string(), "".to_string()],
         ec_key: None,
         debug,
+        auth_callback: None,
     }
 }
 
 impl Bedrock {
+    pub fn set_auth_callback<F>(&mut self, callback: F)
+    where
+        F: Fn(&str, &str) + Send + Sync + 'static,
+    {
+        self.auth_callback = Some(Box::new(callback));
+    }
+
     pub async fn auth(&mut self) -> bool {
         let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).expect("EC Group Error");
         let ec_key = EcKey::generate(&group).expect("Private Key Error");
@@ -112,10 +121,15 @@ impl Bedrock {
         match self.oauth20_connect().await {
             Ok((oauth_connect, error_response)) => {
                 if let Some(oauth_conn) = oauth_connect {
-                    println!(
-                        "You can log in with the code {} at {}",
-                        oauth_conn.user_code, oauth_conn.verification_uri
-                    );
+                    if let Some(ref callback) = self.auth_callback {
+                        callback(&oauth_conn.user_code, &oauth_conn.verification_uri);
+                    }
+                    if self.debug {
+                        println!(
+                            "You can log in with the code {} at {}",
+                            oauth_conn.user_code, oauth_conn.verification_uri
+                        );
+                    }
                     device_code = oauth_conn.device_code;
                 }
                 if let Some(err) = error_response {
