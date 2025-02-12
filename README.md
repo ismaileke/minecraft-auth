@@ -16,7 +16,7 @@ use minecraft_auth::bedrock;
 
 #[tokio::main]
 async fn main() {
-    let mut bedrock = bedrock::new("1.21.50".to_string(), false); // (client version, debug mode)
+    let mut bedrock = bedrock::new("1.21.60".to_string(), false); // (client version, debug mode)
 
     bedrock.set_auth_callback(|code, url| { // If you want to use the code and link and do something:
         println!("Code: {} URL: {}", code, url);
