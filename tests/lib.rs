@@ -5,7 +5,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_work_function() {
-        let mut bedrock = bedrock::new("1.21.80".to_string(), false);
+        let mut bedrock = bedrock::new("1.21.90".to_string(), false);
 
         bedrock.set_auth_callback(|code, url| {
             println!("You can log in with the code {} at {}", code, url);
