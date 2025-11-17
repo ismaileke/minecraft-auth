@@ -1,21 +1,21 @@
-use std::string::String;
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
-use reqwest::{Client, Error, StatusCode};
-use serde::Deserialize;
-use std::collections::HashMap;
-use std::process::exit;
+use chrono::{DateTime, Utc};
 use openssl::base64::{decode_block, encode_block};
 use openssl::bn::BigNumContext;
 use openssl::ec::{EcGroup, EcKey, PointConversionForm};
-use openssl::nid::Nid;
-use openssl::pkey::{PKey, Private};
-use serde_json::{json, Value};
-use uuid::Uuid;
-use openssl::sign::Signer;
-use chrono::Utc;
 use openssl::ecdsa::EcdsaSig;
 use openssl::error::ErrorStack;
+use openssl::nid::Nid;
+use openssl::pkey::{PKey, Private};
+use openssl::sign::Signer;
+use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
+use reqwest::{Client, Error, StatusCode};
 use serde::de::StdError;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::process::exit;
+use std::string::String;
+use uuid::Uuid;
 
 pub struct Bedrock {
     client: Client,
@@ -25,9 +25,13 @@ pub struct Bedrock {
     ec_key: Option<EcKey<Private>>,
     debug: bool,
     auth_callback: Option<Box<dyn Fn(&str, &str) + Send + Sync>>,
+    mc_token_valid_until: Option<DateTime<Utc>>,
+    mc_token: Option<String>,
+    signed_token: Option<String>,
+    playfab_session_ticket: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 pub struct ErrorResponse {
     error: String,
     error_description: String,
@@ -79,16 +83,110 @@ pub struct ChainData {
     chain: Value
 }
 
+
+#[derive(Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct PlayFabLoginRequest {
+    title_id: String,
+    create_account: bool,
+    xbox_token: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct PlayFabLoginData {
+    session_ticket: String,
+    #[serde(rename = "PlayFabId")]
+    playfab_id: String,
+    entity_token: Option<Value>,
+}
+
+#[derive(Deserialize)]
+struct PlayFabLoginResponse {
+    data: PlayFabLoginData,
+}
+
+
+#[derive(Deserialize)]
+struct SessionStartResult {
+    result: SessionStartInner,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct SessionStartInner {
+    #[serde(rename = "authorizationHeader")]
+    authorization_header: String,
+    #[serde(rename = "validUntil")]
+    valid_until: String,
+    #[serde(rename = "issuedAt")]
+    issued_at: String,
+}
+
+#[derive(Deserialize)]
+struct MultiplayerStartResult {
+    result: MultiplayerStartInner,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct MultiplayerStartInner {
+    #[serde(rename = "signedToken")]
+    signed_token: String,
+    #[serde(rename = "validUntil")]
+    valid_until: String,
+    #[serde(rename = "issuedAt")]
+    issued_at: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct SessionStartRequestDevice {
+    application_type: &'static str,
+    capabilities: Vec<String>,
+    game_version: String,
+    id: String,
+    is_preview: bool,
+    memory: String,
+    platform: String,
+    play_fab_title_id: String,
+    store_platform: String,
+    treatment_overrides: Option<Value>,
+    #[serde(rename = "type")]
+    typ: String,
+}
+
+#[derive(Serialize)]
+struct SessionStartRequestUser {
+    language: String,
+    language_code: String,
+    region_code: String,
+    token: String,
+    token_type: String,
+}
+
+#[derive(Serialize)]
+struct SessionStartRequest {
+    device: SessionStartRequestDevice,
+    user: SessionStartRequestUser,
+}
+
+
+
 pub fn new(client_version: String, debug: bool) -> Bedrock {
     let client = Client::new();
     Bedrock {
         client,
         client_id: "0000000048183522",
-        client_version: client_version.clone(),
+        client_version,
         chain_data: vec!["".to_string(), "".to_string()],
         ec_key: None,
         debug,
         auth_callback: None,
+        mc_token_valid_until: None,
+        mc_token: None,
+        signed_token: None,
+        playfab_session_ticket: None,
     }
 }
 
@@ -117,6 +215,7 @@ impl Bedrock {
         let mut device_token = String::new();
         let mut authorization_token = String::new();
         let mut xbox_user_id = String::new();
+        let mut user_token = String::new();
 
         match self.oauth20_connect().await {
             Ok((oauth_connect, error_response)) => {
@@ -187,16 +286,18 @@ impl Bedrock {
             }
         }
 
-        match self.sisu_authorize(key.clone(), access_token, device_token, x_b64.clone(), y_b64.clone()).await {
+        match self.sisu_authorize(key.clone(), access_token, device_token.clone(), x_b64.clone(), y_b64.clone()).await {
             Ok((token_data, error_response)) => {
                 if let Some(sisu) = token_data {
+                    user_token = sisu.user_token.token;
                     authorization_token = sisu.authorization_token.token;
-                    xbox_user_id = sisu.authorization_token.display_claims
+                    xbox_user_id = sisu.user_token.display_claims
                         .get("xui")
                         .and_then(|v| v.get(0))
                         .and_then(|v| v.get("uhs"))
                         .and_then(|v| v.as_str())
-                        .unwrap_or("UHS not found").parse().unwrap();
+                        .unwrap_or("UHS not found")
+                        .to_string();
                     if xbox_user_id == "UHS not found".to_string() {
                         exit("UHS not found".parse().unwrap());
                     }
@@ -216,7 +317,7 @@ impl Bedrock {
             }
         }
 
-        match self.minecraft_authentication(xbox_user_id, authorization_token).await {
+        match self.minecraft_authentication(xbox_user_id.clone(), authorization_token.clone()).await {
             Ok((chain_data, error_response)) => {
                 if let Some(chain) = chain_data {
                     if let Some(arr) = chain.chain.as_array() {
@@ -224,30 +325,86 @@ impl Bedrock {
                             if let Some(jwt) = item.as_str() {
                                 self.chain_data[index] = jwt.to_string();
                             } else {
-                                eprintln!("Item is not a string");
-                                return false;
+                                panic!("Item is not a string");
                             }
                         }
                     } else {
-                        eprintln!("Expected a JSON array");
-                        return false;
+                        panic!("Expected a JSON array");
                     }
                     if self.debug {
                         println!("Minecraft Authorization Successful");
                     }
-                    return true;
                 }
                 if let Some(err) = error_response {
-                    println!(
+                    panic!(
                         "Minecraft Authorization -> Error: {}, Error Description: {}",
                         err.error, err.error_description
                     );
                 }
             }
             Err(e) => {
-                println!("\n\nMinecraft Authorization General Error: {:?}", e);
+                panic!("\n\nMinecraft Authorization General Error: {:?}", e);
             }
         }
+
+
+        // get XSTS token for PlayFab
+        let playfab_xsts_token = match self.get_xsts_token_for_playfab(user_token).await {
+            Ok(token) => token,
+            Err(e) => {
+                println!("PlayFab XSTS Token Error: {:?}", e);
+                return false;
+            }
+        };
+
+        // PlayFab Login
+        match self.playfab_login(&playfab_xsts_token.0, &playfab_xsts_token.1).await {
+            Ok(_) => {
+                if self.debug {
+                    println!("PlayFab Login Successful");
+                }
+            }
+            Err(e) => {
+                println!("PlayFab Login Error: {:?}", e);
+                return false;
+            }
+        }
+
+        // Session Start
+        let device_id = Uuid::new_v4().to_string();
+        const PLAYFAB_TITLE_ID: &str = "20CA2";
+
+        match self.session_start(PLAYFAB_TITLE_ID, &device_id).await {
+            Ok(_) => {
+                if self.debug {
+                    println!("Session Start Successful");
+                }
+            }
+            Err(e) => {
+                println!("Session Start Error: {:?}", e);
+                return false;
+            }
+        }
+
+        // Multiplayer Session Start
+        if let Some(ref ec_key) = self.ec_key {
+            let public_key_pem = ec_key.public_key_to_pem().expect("Public Key PEM Error");
+            let public_key_der = pem_to_der(&public_key_pem).expect("Public Key Der Error");
+            let public_key_base64 = encode_block(&public_key_der);
+
+            match self.multiplayer_session_start(&public_key_base64).await {
+                Ok(_) => {
+                    if self.debug {
+                        println!("Multiplayer Session Start Successful");
+                    }
+                }
+                Err(e) => {
+                    println!("Multiplayer Session Start Error: {:?}", e);
+                    return false;
+                }
+            }
+        }
+
         false
     }
 
@@ -257,6 +414,10 @@ impl Bedrock {
 
     pub fn get_ec_key(&self) -> Option<EcKey<Private>> {
         self.ec_key.clone()
+    }
+
+    pub fn get_signed_token(&self) -> Option<String> {
+        self.signed_token.clone()
     }
 
     pub async fn oauth20_connect(&self) -> Result<(Option<OAuth20Connect>, Option<ErrorResponse>), Error> {
@@ -286,32 +447,32 @@ impl Bedrock {
                     println!("<------------------------*");
                 }
 
-                Ok((Option::from(oauth), None))
+                Ok((Some(oauth), None))
             }
             StatusCode::BAD_REQUEST => {
                 let err_response: ErrorResponse = response.json().await?;
-                Ok((None, Option::from(err_response)))
+                Ok((None, Some(err_response)))
             }
             StatusCode::UNAUTHORIZED => {
                 let err = ErrorResponse {
                     error: "HTTP 401".to_string(),
                     error_description: "Unauthorized".to_string(),
                 };
-                Ok((None, Option::from(err)))
+                Ok((None, Some(err)))
             }
             StatusCode::FORBIDDEN => {
                 let err = ErrorResponse {
                     error: "HTTP 403".to_string(),
                     error_description: "Forbidden".to_string(),
                 };
-                Ok((None, Option::from(err)))
+                Ok((None, Some(err)))
             }
             _ => {
                 let err = ErrorResponse {
                     error: response.status().to_string(),
                     error_description: "".to_string(),
                 };
-                Ok((None, Option::from(err)))
+                Ok((None, Some(err)))
             }
         }
     }
@@ -344,32 +505,32 @@ impl Bedrock {
                     println!("<----------------------*");
                 }
 
-                Ok((Option::from(oauth), None))
+                Ok((Some(oauth), None))
             }
             StatusCode::BAD_REQUEST => {
                 let err_response: ErrorResponse = response.json().await?;
-                Ok((None, Option::from(err_response)))
+                Ok((None, Some(err_response)))
             }
             StatusCode::UNAUTHORIZED => {
                 let err = ErrorResponse {
                     error: "HTTP 401".to_string(),
                     error_description: "Unauthorized".to_string(),
                 };
-                Ok((None, Option::from(err)))
+                Ok((None, Some(err)))
             }
             StatusCode::FORBIDDEN => {
                 let err = ErrorResponse {
                     error: "HTTP 403".to_string(),
                     error_description: "Forbidden".to_string(),
                 };
-                Ok((None, Option::from(err)))
+                Ok((None, Some(err)))
             }
             _ => {
                 let err = ErrorResponse {
                     error: response.status().to_string(),
                     error_description: "".to_string(),
                 };
-                Ok((None, Option::from(err)))
+                Ok((None, Some(err)))
             }
         }
     }
@@ -429,32 +590,32 @@ impl Bedrock {
                     println!("Display Claims -> XDI -> DID & DCS: {}", claim.display_claims.to_string()); // You don't need that
                     println!("*------------------>");
                 }
-                Ok((Option::from(claim), None))
+                Ok((Some(claim), None))
             }
             StatusCode::BAD_REQUEST => {
                 let err_response: ErrorResponse = response.json().await?;
-                Ok((None, Option::from(err_response)))
+                Ok((None, Some(err_response)))
             }
             StatusCode::UNAUTHORIZED => {
                 let err = ErrorResponse {
                     error: "HTTP 401".to_string(),
                     error_description: "Unauthorized".to_string(),
                 };
-                Ok((None, Option::from(err)))
+                Ok((None, Some(err)))
             }
             StatusCode::FORBIDDEN => {
                 let err = ErrorResponse {
                     error: "HTTP 403".to_string(),
                     error_description: "Forbidden".to_string(),
                 };
-                Ok((None, Option::from(err)))
+                Ok((None, Some(err)))
             }
             _ => {
                 let err = ErrorResponse {
                     error: response.status().to_string(),
                     error_description: "".to_string(),
                 };
-                Ok((None, Option::from(err)))
+                Ok((None, Some(err)))
             }
         }
     }
@@ -518,32 +679,32 @@ impl Bedrock {
                     println!("Flow: {}", token_data.flow);
                     println!("*-------------------->");
                 }
-                Ok((Option::from(token_data), None))
+                Ok((Some(token_data), None))
             }
             StatusCode::BAD_REQUEST => {
                 let err_response: ErrorResponse = response.json().await?;
-                Ok((None, Option::from(err_response)))
+                Ok((None, Some(err_response)))
             }
             StatusCode::UNAUTHORIZED => {
                 let err = ErrorResponse {
                     error: "HTTP 401".to_string(),
                     error_description: "Unauthorized".to_string(),
                 };
-                Ok((None, Option::from(err)))
+                Ok((None, Some(err)))
             }
             StatusCode::FORBIDDEN => {
                 let err = ErrorResponse {
                     error: "HTTP 403".to_string(),
                     error_description: "Forbidden".to_string(),
                 };
-                Ok((None, Option::from(err)))
+                Ok((None, Some(err)))
             }
             _ => {
                 let err = ErrorResponse {
                     error: response.status().to_string(),
                     error_description: "".to_string(),
                 };
-                Ok((None, Option::from(err)))
+                Ok((None, Some(err)))
             }
         }
     }
@@ -552,7 +713,7 @@ impl Bedrock {
         let group = EcGroup::from_curve_name(Nid::SECP384R1).expect("EC Group Error");
         let ec_key = EcKey::generate(&group).expect("Private Key Error");
         //let pkey = PKey::from_ec_key(ec_key.clone()).expect("PKey Error");
-        self.ec_key = Option::from(ec_key.clone());
+        self.ec_key = Some(ec_key.clone());
 
         let public_key_pem = ec_key.public_key_to_pem().expect("Public Key PEM Error");
         let public_key_der = pem_to_der(&public_key_pem).expect("Public Key Der Error");
@@ -584,35 +745,236 @@ impl Bedrock {
                     println!("Chain: {}", chain_data.chain);
                     println!("*------------------------------>");
                 }
-                Ok((Option::from(chain_data), None))
+                Ok((Some(chain_data), None))
             }
             StatusCode::BAD_REQUEST => {
                 let err_response: ErrorResponse = response.json().await?;
-                Ok((None, Option::from(err_response)))
+                Ok((None, Some(err_response)))
             }
             StatusCode::UNAUTHORIZED => {
                 let err = ErrorResponse {
                     error: "HTTP 401".to_string(),
                     error_description: "Unauthorized".to_string(),
                 };
-                Ok((None, Option::from(err)))
+                Ok((None, Some(err)))
             }
             StatusCode::FORBIDDEN => {
                 let err = ErrorResponse {
                     error: "HTTP 403".to_string(),
                     error_description: "Forbidden".to_string(),
                 };
-                Ok((None, Option::from(err)))
+                Ok((None, Some(err)))
             }
             _ => {
                 let err = ErrorResponse {
                     error: response.status().to_string(),
                     error_description: "".to_string(),
                 };
-                Ok((None, Option::from(err)))
+                Ok((None, Some(err)))
             }
         }
     }
+
+    pub async fn get_xsts_token_for_playfab(&self, user_token: String) -> Result<(String, String), Error> {
+        let body = json!({
+            "Properties": {
+                "SandboxId": "RETAIL",
+                "UserTokens": [user_token]
+            },
+            "RelyingParty": "https://b980a380.minecraft.playfabapi.com/",
+            "TokenType": "JWT"
+        });
+
+        let response = self
+            .client
+            .post("https://xsts.auth.xboxlive.com/xsts/authorize")
+            .header(CONTENT_TYPE, "application/json")
+            .header("x-xbl-contract-version", "1")
+            .json(&body)
+            .send()
+            .await?;
+
+        let status = response.status();
+        let body_text = response.text().await.unwrap_or_default();
+
+        if self.debug {
+            println!("\n=== XSTS FOR PLAYFAB ===");
+            println!("Status: {}", status);
+            println!("Response: {}", &body_text[..200.min(body_text.len())]);
+            println!("========================\n");
+        }
+
+        if status.is_success() {
+            let claim: Claims = serde_json::from_str(&body_text)
+                .expect("Failed to parse XSTS response");
+            Ok((claim.token, claim.display_claims
+                .get("xui")
+                .and_then(|v| v.get(0))
+                .and_then(|v| v.get("uhs"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("UHS not found")
+                .to_string()))
+        } else {
+            panic!("XSTS failed: {}", body_text);
+        }
+    }
+
+    pub async fn playfab_login(&mut self, xsts_token: &str, uhs: &str) -> Result<(), Error> {
+        let url = "https://20ca2.playfabapi.com/Client/LoginWithXbox";
+
+        // PlayFab token formatı: XBL3.0 x=<uhs>;<xsts_token>
+        let xbox_token = format!("XBL3.0 x={};{}", uhs, xsts_token);
+
+        let body = PlayFabLoginRequest {
+            title_id: String::from("20CA2"),
+            create_account: true,
+            xbox_token,
+        };
+
+        if self.debug {
+            println!("\n=== PLAYFAB LOGIN ===");
+            println!("Xbox User ID: {}", uhs);
+            println!("XSTS Token (first 50): {}", &xsts_token[..50.min(xsts_token.len())]);
+        }
+
+        let resp = self
+            .client
+            .post(url)
+            .header(CONTENT_TYPE, "application/json")
+            .json(&body)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        let body_text = resp.text().await.unwrap_or_default();
+
+        if self.debug {
+            println!("Status: {}", status);
+            println!("Response: {}", body_text);
+            println!("====================\n");
+        }
+
+        if status.is_success() {
+            let parsed: PlayFabLoginResponse = serde_json::from_str(&body_text)
+                .expect("Failed to parse PlayFab response");
+            self.playfab_session_ticket = Some(parsed.data.session_ticket.clone());
+
+            if self.debug {
+                println!("PlayFab Login Successful");
+                println!("Session Ticket: {}", parsed.data.session_ticket);
+            }
+            Ok(())
+        } else {
+            panic!("PlayFab login failed: {}", body_text);
+        }
+    }
+
+    pub async fn session_start(&mut self, playfab_title_id: &str, device_id: &str) -> Result<(), Error> {
+        let url = "https://authorization.franchise.minecraft-services.net/api/v1.0/session/start";
+
+        let session_ticket = match &self.playfab_session_ticket {
+            Some(ticket) => ticket.clone(),
+            None => {
+                panic!("No PlayFab session ticket");
+            }
+        };
+
+        let device = SessionStartRequestDevice {
+            application_type: "MinecraftPE",
+            capabilities: vec![],
+            game_version: self.client_version.clone(),
+            id: device_id.to_string(),
+            is_preview: false,
+            memory: String::from("1024"),
+            platform: String::from("Windows10"),
+            play_fab_title_id: playfab_title_id.to_string(),
+            store_platform: String::from("uwp.store"),
+            treatment_overrides: None,
+            typ: String::from("Windows10"),
+        };
+
+        let user = SessionStartRequestUser {
+            language: String::from("en"),
+            language_code: String::from("en-US"),
+            region_code: String::from("US"),
+            token: session_ticket,
+            token_type: String::from("PlayFab"),
+        };
+
+        let body = SessionStartRequest { device, user };
+
+        let resp = self
+            .client
+            .post(url)
+            .header(CONTENT_TYPE, "application/json")
+            .json(&body)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        let body_text = resp.text().await.unwrap_or_default();
+
+        if self.debug {
+            println!("\n=== SESSION START ===");
+            println!("Status: {}", status);
+            println!("Response: {}", body_text);
+            println!("====================\n");
+        }
+
+        if status.is_success() {
+            let parsed: SessionStartResult = serde_json::from_str(&body_text).unwrap();
+            let auth_header = parsed.result.authorization_header;
+            let valid_until = parsed.result.valid_until;
+
+            if let Ok(dt) = DateTime::parse_from_rfc3339(&valid_until) {
+                self.mc_token_valid_until = Some(dt.with_timezone(&Utc));
+            }
+
+            self.mc_token = Some(auth_header);
+            Ok(())
+        } else {
+            panic!("Session start failed: {}", body_text);
+        }
+    }
+
+    pub async fn multiplayer_session_start(&mut self, public_key_base64: &str) -> Result<(), Error> {
+        let url = "https://authorization.franchise.minecraft-services.net/api/v1.0/multiplayer/session/start";
+
+        let mc_token = match &self.mc_token {
+            Some(t) => t.clone(),
+            None => {
+                panic!("No MC token");
+            }
+        };
+
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, HeaderValue::from_str(&mc_token).unwrap());
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+
+        let body = json!({ "publicKey": public_key_base64 });
+
+        let resp = self
+            .client
+            .post(url)
+            .headers(headers)
+            .json(&body)
+            .send()
+            .await?;
+
+        if resp.status().is_success() {
+            let parsed: MultiplayerStartResult = resp.json().await?;
+            self.signed_token = Some(parsed.result.signed_token);
+
+            if self.debug {
+                println!("Multiplayer session start successful");
+            }
+            Ok(())
+        } else {
+            let body_text = resp.text().await.unwrap_or_default();
+            panic!("Multiplayer session start failed: {}", body_text);
+        }
+    }
+
 }
 
 

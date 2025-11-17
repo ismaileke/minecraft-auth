@@ -14,3 +14,4 @@ serde = { version = "1.0.219", features = ["derive"] }
 uuid = { version = "1.18.0", features = ["v4"] }
 openssl = "0.10.73"
 chrono = "0.4.41"
+log = "0.4.22"
