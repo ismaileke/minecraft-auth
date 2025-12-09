@@ -68,14 +68,11 @@ pub struct Claims {
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct TokenData {
-    device_token: String,
     title_token: Claims,
     user_token: Claims,
     authorization_token: Claims,
     web_page: String,
-    sandbox: String,
-    use_modern_gamertag: bool,
-    flow: String,
+    ucs_migration_response: Value
 }
 
 #[derive(Deserialize)]
@@ -624,7 +621,7 @@ impl Bedrock {
         let body = json!({
             "AccessToken": format!("t={}", access_token),
             "AppId": self.client_id,
-            "deviceToken": device_token,
+            "DeviceToken": device_token,
             "Sandbox": "RETAIL",
             "UseModernGamertag": true,
             "SiteName": "user.auth.xboxlive.com",
@@ -669,14 +666,11 @@ impl Bedrock {
                 let token_data: TokenData = response.json().await?;
                 if self.debug {
                     println!("*-- Sisu Authorize --->");
-                    println!("Device Token: {}", token_data.device_token);
                     println!("Title Token (Just Token): {}", token_data.title_token.token);
                     println!("User Token (Just Token): {}", token_data.user_token.token);
                     println!("Authorization Token (Just Token): {}", token_data.authorization_token.token);
                     println!("Web Page: {}", token_data.web_page);
-                    println!("Sandbox: {}", token_data.sandbox);
-                    println!("User Modern GamerTag: {}", token_data.use_modern_gamertag);
-                    println!("Flow: {}", token_data.flow);
+                    println!("Ucs Migration Response: {:?}", token_data.ucs_migration_response);
                     println!("*-------------------->");
                 }
                 Ok((Some(token_data), None))
