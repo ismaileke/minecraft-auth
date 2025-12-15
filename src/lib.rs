@@ -1,2 +1,8 @@
+#[cfg(feature = "rustcrypto")]
 pub mod bedrock;
-//pub mod java;
+
+#[cfg(feature = "openssl")]
+#[path = "bedrock_openssl.rs"]
+pub mod bedrock;
+
+pub use bedrock::*;

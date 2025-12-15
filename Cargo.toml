@@ -6,12 +6,26 @@ authors = ["ismaileke"]
 license = "MIT"
 edition = "2021"
 
+[features]
+default = ["rustcrypto"]
+rustcrypto = ["p256", "p384", "sha2"]
+openssl = ["dep:openssl"]
+
 [dependencies]
-reqwest = { version = "0.12.23", features = ["native-tls", "json"] }
-tokio = { version = "1.47.1", features = ["full"] }
-serde_json = "1.0.142"
-serde = { version = "1.0.219", features = ["derive"] }
-uuid = { version = "1.18.0", features = ["v4"] }
-openssl = "0.10.73"
-chrono = "0.4.41"
-log = "0.4.22"
+chrono = "0.4.42"
+base64 = "0.22.1"
+reqwest = { version = "0.12.25", features = ["json"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+uuid = { version = "1.19.0", features = ["v4"] }
+
+# RustCrypto dependencies (optional)
+p256 = { version = "0.13", features = ["ecdsa"], optional = true }
+p384 = { version = "0.13", features = ["ecdsa"], optional = true }
+sha2 = { version = "0.10", optional = true }
+
+# OpenSSL dependencies (optional)
+openssl = { version = "0.10", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1.48.0", features = ["full", "macros"] }

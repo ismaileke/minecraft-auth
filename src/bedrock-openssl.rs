@@ -1,19 +1,17 @@
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use chrono::{DateTime, Utc};
-use p256::{
-    ecdsa::{signature::DigestSigner, Signature, SigningKey},
-    elliptic_curve::rand_core::OsRng, EncodedPoint as EncodedPoint256,
-    PublicKey,
-};
-use p384::{
-    ecdsa::SigningKey as SigningKey384,
-    EncodedPoint as EncodedPoint384, PublicKey as PublicKey384,
-};
+use openssl::base64::{decode_block, encode_block};
+use openssl::bn::BigNumContext;
+use openssl::ec::{EcGroup, EcKey, PointConversionForm};
+use openssl::ecdsa::EcdsaSig;
+use openssl::error::ErrorStack;
+use openssl::nid::Nid;
+use openssl::pkey::{PKey, Private};
+use openssl::sign::Signer;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
 use reqwest::{Client, Error, StatusCode};
+use serde::de::StdError;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::process::exit;
 use std::string::String;
@@ -24,7 +22,7 @@ pub struct Bedrock {
     client_id: &'static str,
     client_version: String,
     chain_data: Vec<String>,
-    signing_key_384: Option<SigningKey384>,
+    ec_key: Option<EcKey<Private>>,
     debug: bool,
     auth_callback: Option<Box<dyn Fn(&str, &str) + Send + Sync>>,
     mc_token_valid_until: Option<DateTime<Utc>>,
@@ -82,6 +80,7 @@ pub struct ChainData {
     chain: Value
 }
 
+
 #[derive(Serialize)]
 #[serde(rename_all = "PascalCase")]
 struct PlayFabLoginRequest {
@@ -94,7 +93,8 @@ struct PlayFabLoginRequest {
 #[serde(rename_all = "PascalCase")]
 struct PlayFabLoginData {
     session_ticket: String,
-    play_fab_id: String,
+    #[serde(rename = "PlayFabId")]
+    playfab_id: String,
     entity_token: Option<Value>,
 }
 
@@ -103,16 +103,20 @@ struct PlayFabLoginResponse {
     data: PlayFabLoginData,
 }
 
+
 #[derive(Deserialize)]
 struct SessionStartResult {
     result: SessionStartInner,
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "PascalCase")]
 struct SessionStartInner {
+    #[serde(rename = "authorizationHeader")]
     authorization_header: String,
+    #[serde(rename = "validUntil")]
     valid_until: String,
+    #[serde(rename = "issuedAt")]
     issued_at: String,
 }
 
@@ -122,10 +126,13 @@ struct MultiplayerStartResult {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "PascalCase")]
 struct MultiplayerStartInner {
+    #[serde(rename = "signedToken")]
     signed_token: String,
+    #[serde(rename = "validUntil")]
     valid_until: String,
+    #[serde(rename = "issuedAt")]
     issued_at: String,
 }
 
@@ -161,6 +168,8 @@ struct SessionStartRequest {
     user: SessionStartRequestUser,
 }
 
+
+
 pub fn new(client_version: String, debug: bool) -> Bedrock {
     let client = Client::new();
     Bedrock {
@@ -168,7 +177,7 @@ pub fn new(client_version: String, debug: bool) -> Bedrock {
         client_id: "0000000048183522",
         client_version,
         chain_data: vec!["".to_string(), "".to_string()],
-        signing_key_384: None,
+        ec_key: None,
         debug,
         auth_callback: None,
         mc_token_valid_until: None,
@@ -187,21 +196,16 @@ impl Bedrock {
     }
 
     pub async fn auth(&mut self) -> bool {
-        // Create P-256 key pair
-        let signing_key = SigningKey::random(&mut OsRng);
-        let verifying_key = signing_key.verifying_key();
-        let public_key = PublicKey::from(verifying_key);
+        let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).expect("EC Group Error");
+        let ec_key = EcKey::generate(&group).expect("Private Key Error");
+        let key = PKey::from_ec_key(ec_key.clone()).expect("PKey Error");
+        let mut ctx = BigNumContext::new().expect("BigNumContext Error");
+        //println!("Private Key (PEM):\n{}", String::from_utf8_lossy(&private_key_pem));
 
-        // Take the public key as an encoded point
-        let encoded_point = EncodedPoint256::from(public_key);
-        let public_key_bytes = encoded_point.as_bytes();
-
-        // Separate the X and Y coordinates (uncompressed format: 0x04 || X || Y)
-        let x_bytes = &public_key_bytes[1..33];
-        let y_bytes = &public_key_bytes[33..65];
-
-        let x_b64 = BASE64.encode(x_bytes);
-        let y_b64 = BASE64.encode(y_bytes);
+        let public_key_bytes = ec_key.public_key().to_bytes(&group, PointConversionForm::UNCOMPRESSED, &mut ctx).expect("Public Key Error");
+        let (x_bytes, y_bytes) = public_key_bytes.split_at(33);
+        let x_b64 = encode_block(&x_bytes[1..]);
+        let y_b64 = encode_block(y_bytes);
 
         let mut device_code = String::new();
         let mut access_token = String::new();
@@ -259,7 +263,7 @@ impl Bedrock {
             }
         }
 
-        match self.device_auth(&signing_key, x_b64.clone(), y_b64.clone()).await {
+        match self.device_auth(key.clone(), x_b64.clone(), y_b64.clone()).await {
             Ok((device_auth, error_response)) => {
                 if let Some(auth) = device_auth {
                     device_token = auth.token;
@@ -279,7 +283,7 @@ impl Bedrock {
             }
         }
 
-        match self.sisu_authorize(&signing_key, access_token, device_token.clone(), x_b64.clone(), y_b64.clone()).await {
+        match self.sisu_authorize(key.clone(), access_token, device_token.clone(), x_b64.clone(), y_b64.clone()).await {
             Ok((token_data, error_response)) => {
                 if let Some(sisu) = token_data {
                     user_token = sisu.user_token.token;
@@ -292,7 +296,7 @@ impl Bedrock {
                         .unwrap_or("UHS not found")
                         .to_string();
                     if xbox_user_id == "UHS not found".to_string() {
-                        exit(1);
+                        exit("UHS not found".parse().unwrap());
                     }
                     if self.debug {
                         println!("Sisu Authorize Successful");
@@ -340,6 +344,8 @@ impl Bedrock {
             }
         }
 
+
+        // get XSTS token for PlayFab
         let playfab_xsts_token = match self.get_xsts_token_for_playfab(user_token).await {
             Ok(token) => token,
             Err(e) => {
@@ -348,6 +354,7 @@ impl Bedrock {
             }
         };
 
+        // PlayFab Login
         match self.playfab_login(&playfab_xsts_token.0, &playfab_xsts_token.1).await {
             Ok(_) => {
                 if self.debug {
@@ -360,6 +367,7 @@ impl Bedrock {
             }
         }
 
+        // Session Start
         let device_id = Uuid::new_v4().to_string();
         const PLAYFAB_TITLE_ID: &str = "20CA2";
 
@@ -375,14 +383,11 @@ impl Bedrock {
             }
         }
 
-        if let Some(ref signing_key) = self.signing_key_384 {
-            let verifying_key = signing_key.verifying_key();
-            let public_key = PublicKey384::from(verifying_key);
-            let encoded_point = EncodedPoint384::from(public_key);
-
-            // Convert to SubjectPublicKeyInfo format
-            let public_key_der = spki_encode_p384(&encoded_point);
-            let public_key_base64 = BASE64.encode(&public_key_der);
+        // Multiplayer Session Start
+        if let Some(ref ec_key) = self.ec_key {
+            let public_key_pem = ec_key.public_key_to_pem().expect("Public Key PEM Error");
+            let public_key_der = pem_to_der(&public_key_pem).expect("Public Key Der Error");
+            let public_key_base64 = encode_block(&public_key_der);
 
             match self.multiplayer_session_start(&public_key_base64).await {
                 Ok(_) => {
@@ -397,15 +402,15 @@ impl Bedrock {
             }
         }
 
-        true
+        false
     }
 
     pub fn get_chain_data(&self) -> Vec<String> {
         self.chain_data.to_vec()
     }
 
-    pub fn get_signing_key_384(&self) -> Option<SigningKey384> {
-        self.signing_key_384.clone()
+    pub fn get_ec_key(&self) -> Option<EcKey<Private>> {
+        self.ec_key.clone()
     }
 
     pub fn get_signed_token(&self) -> Option<String> {
@@ -438,6 +443,7 @@ impl Bedrock {
                     println!("Verification URI: {}", oauth.verification_uri);
                     println!("<------------------------*");
                 }
+
                 Ok((Some(oauth), None))
             }
             StatusCode::BAD_REQUEST => {
@@ -495,11 +501,26 @@ impl Bedrock {
                     println!("User ID: {}", oauth.user_id);
                     println!("<----------------------*");
                 }
+
                 Ok((Some(oauth), None))
             }
             StatusCode::BAD_REQUEST => {
                 let err_response: ErrorResponse = response.json().await?;
                 Ok((None, Some(err_response)))
+            }
+            StatusCode::UNAUTHORIZED => {
+                let err = ErrorResponse {
+                    error: "HTTP 401".to_string(),
+                    error_description: "Unauthorized".to_string(),
+                };
+                Ok((None, Some(err)))
+            }
+            StatusCode::FORBIDDEN => {
+                let err = ErrorResponse {
+                    error: "HTTP 403".to_string(),
+                    error_description: "Forbidden".to_string(),
+                };
+                Ok((None, Some(err)))
             }
             _ => {
                 let err = ErrorResponse {
@@ -511,19 +532,19 @@ impl Bedrock {
         }
     }
 
-    pub async fn device_auth(&self, signing_key: &SigningKey, x_b64: String, y_b64: String) -> Result<(Option<Claims>, Option<ErrorResponse>), Error> {
+    pub async fn device_auth(&self, ec_key: PKey<Private>, x_b64: String, y_b64: String) -> Result<(Option<Claims>, Option<ErrorResponse>), Error> {
         let body = json!({
             "Properties": {
-                "AuthMethod": "ProofOfPossession",
-                "DeviceType": "Android",
-                "Id": Uuid::new_v4().to_string(),
-                "ProofKey": {
-                    "crv": "P-256",
-                    "alg": "ES256",
-                    "use": "sig",
-                    "kty": "EC",
-                    "x": x_b64,
-                    "y": y_b64
+            "AuthMethod": "ProofOfPossession",
+            "DeviceType": "Android",
+            "Id": Uuid::new_v4().to_string(),
+            "ProofKey": {
+                "crv": "P-256",
+                "alg": "ES256",
+                "use": "sig",
+                "kty": "EC",
+                "x": x_b64,
+                "y": y_b64
                 },
                 "Version": "10"
             },
@@ -535,8 +556,17 @@ impl Bedrock {
         headers.insert("x-xbl-contract-version", HeaderValue::from_static("1"));
 
         let body_str = body.to_string();
-        let signature = sign("/device/authenticate", &body_str, signing_key);
-        headers.insert("Signature", HeaderValue::from_str(&signature).unwrap());
+        match sign("/device/authenticate", &body_str, &ec_key) {
+            Ok(signature) => {
+                match HeaderValue::from_str(&signature) {
+                    Ok(header_value) => {
+                        headers.insert("Signature", header_value);
+                    }
+                    Err(e) => eprintln!("Failed to create HeaderValue: {}", e),
+                }
+            }
+            Err(e) => eprintln!("Signature creation failed: {}", e),
+        }
 
         let response = self
             .client
@@ -554,9 +584,28 @@ impl Bedrock {
                     println!("Issue Instant: {}", claim.issue_instant);
                     println!("Not After: {}", claim.not_after);
                     println!("Token: {}", claim.token);
+                    println!("Display Claims -> XDI -> DID & DCS: {}", claim.display_claims.to_string()); // You don't need that
                     println!("*------------------>");
                 }
                 Ok((Some(claim), None))
+            }
+            StatusCode::BAD_REQUEST => {
+                let err_response: ErrorResponse = response.json().await?;
+                Ok((None, Some(err_response)))
+            }
+            StatusCode::UNAUTHORIZED => {
+                let err = ErrorResponse {
+                    error: "HTTP 401".to_string(),
+                    error_description: "Unauthorized".to_string(),
+                };
+                Ok((None, Some(err)))
+            }
+            StatusCode::FORBIDDEN => {
+                let err = ErrorResponse {
+                    error: "HTTP 403".to_string(),
+                    error_description: "Forbidden".to_string(),
+                };
+                Ok((None, Some(err)))
             }
             _ => {
                 let err = ErrorResponse {
@@ -568,7 +617,7 @@ impl Bedrock {
         }
     }
 
-    pub async fn sisu_authorize(&self, signing_key: &SigningKey, access_token: String, device_token: String, x_b64: String, y_b64: String) -> Result<(Option<TokenData>, Option<ErrorResponse>), Error> {
+    pub async fn sisu_authorize(&self, ec_key: PKey<Private>, access_token: String, device_token: String, x_b64: String, y_b64: String) -> Result<(Option<TokenData>, Option<ErrorResponse>), Error> {
         let body = json!({
             "AccessToken": format!("t={}", access_token),
             "AppId": self.client_id,
@@ -585,14 +634,24 @@ impl Bedrock {
                 "x": x_b64,
                 "y": y_b64
             }
+
         });
 
         let mut headers = HeaderMap::new();
         headers.insert("x-xbl-contract-version", HeaderValue::from_static("1"));
 
         let body_str = body.to_string();
-        let signature = sign("/authorize", &body_str, signing_key);
-        headers.insert("Signature", HeaderValue::from_str(&signature).unwrap());
+        match sign("/authorize", &body_str, &ec_key) {
+            Ok(signature) => {
+                match HeaderValue::from_str(&signature) {
+                    Ok(header_value) => {
+                        headers.insert("Signature", header_value);
+                    }
+                    Err(e) => eprintln!("Failed to create HeaderValue: {}", e),
+                }
+            }
+            Err(e) => eprintln!("Signature creation failed: {}", e),
+        }
 
         let response = self
             .client
@@ -607,11 +666,32 @@ impl Bedrock {
                 let token_data: TokenData = response.json().await?;
                 if self.debug {
                     println!("*-- Sisu Authorize --->");
-                    println!("Title Token: {}", token_data.title_token.token);
-                    println!("User Token: {}", token_data.user_token.token);
+                    println!("Title Token (Just Token): {}", token_data.title_token.token);
+                    println!("User Token (Just Token): {}", token_data.user_token.token);
+                    println!("Authorization Token (Just Token): {}", token_data.authorization_token.token);
+                    println!("Web Page: {}", token_data.web_page);
+                    println!("Ucs Migration Response: {:?}", token_data.ucs_migration_response);
                     println!("*-------------------->");
                 }
                 Ok((Some(token_data), None))
+            }
+            StatusCode::BAD_REQUEST => {
+                let err_response: ErrorResponse = response.json().await?;
+                Ok((None, Some(err_response)))
+            }
+            StatusCode::UNAUTHORIZED => {
+                let err = ErrorResponse {
+                    error: "HTTP 401".to_string(),
+                    error_description: "Unauthorized".to_string(),
+                };
+                Ok((None, Some(err)))
+            }
+            StatusCode::FORBIDDEN => {
+                let err = ErrorResponse {
+                    error: "HTTP 403".to_string(),
+                    error_description: "Forbidden".to_string(),
+                };
+                Ok((None, Some(err)))
             }
             _ => {
                 let err = ErrorResponse {
@@ -624,17 +704,14 @@ impl Bedrock {
     }
 
     pub async fn minecraft_authentication(&mut self, xbox_user_id: String, authorization_token: String) -> Result<(Option<ChainData>, Option<ErrorResponse>), Error> {
-        // Create P-384 key pair again
-        let signing_key = SigningKey384::random(&mut OsRng);
-        self.signing_key_384 = Some(signing_key.clone());
+        let group = EcGroup::from_curve_name(Nid::SECP384R1).expect("EC Group Error");
+        let ec_key = EcKey::generate(&group).expect("Private Key Error");
+        //let pkey = PKey::from_ec_key(ec_key.clone()).expect("PKey Error");
+        self.ec_key = Some(ec_key.clone());
 
-        let verifying_key = signing_key.verifying_key();
-        let public_key = PublicKey384::from(verifying_key);
-        let encoded_point = EncodedPoint384::from(public_key);
-
-        // Convert to SubjectPublicKeyInfo format
-        let public_key_der = spki_encode_p384(&encoded_point);
-        let public_key_base64 = BASE64.encode(&public_key_der);
+        let public_key_pem = ec_key.public_key_to_pem().expect("Public Key PEM Error");
+        let public_key_der = pem_to_der(&public_key_pem).expect("Public Key Der Error");
+        let public_key_base64 = encode_block(&public_key_der);
 
         let body = json!({
             "identityPublicKey": public_key_base64,
@@ -643,8 +720,8 @@ impl Bedrock {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, "application/json".parse().unwrap());
         headers.insert(USER_AGENT, "MCPE/Android".parse().unwrap());
-        headers.insert("Client-Version", HeaderValue::from_str(&self.client_version).unwrap());
-        headers.insert(AUTHORIZATION, format!("XBL3.0 x={};{}", xbox_user_id, authorization_token).parse().unwrap());
+        headers.insert("Client-Version", HeaderValue::from_str(self.client_version.as_str()).unwrap());
+        headers.insert(AUTHORIZATION, format!("XBL3.0 x={};{}", xbox_user_id, authorization_token).as_str().parse().unwrap());
 
         let response = self
             .client
@@ -663,6 +740,24 @@ impl Bedrock {
                     println!("*------------------------------>");
                 }
                 Ok((Some(chain_data), None))
+            }
+            StatusCode::BAD_REQUEST => {
+                let err_response: ErrorResponse = response.json().await?;
+                Ok((None, Some(err_response)))
+            }
+            StatusCode::UNAUTHORIZED => {
+                let err = ErrorResponse {
+                    error: "HTTP 401".to_string(),
+                    error_description: "Unauthorized".to_string(),
+                };
+                Ok((None, Some(err)))
+            }
+            StatusCode::FORBIDDEN => {
+                let err = ErrorResponse {
+                    error: "HTTP 403".to_string(),
+                    error_description: "Forbidden".to_string(),
+                };
+                Ok((None, Some(err)))
             }
             _ => {
                 let err = ErrorResponse {
@@ -696,6 +791,13 @@ impl Bedrock {
         let status = response.status();
         let body_text = response.text().await.unwrap_or_default();
 
+        if self.debug {
+            println!("\n=== XSTS FOR PLAYFAB ===");
+            println!("Status: {}", status);
+            println!("Response: {}", &body_text[..200.min(body_text.len())]);
+            println!("========================\n");
+        }
+
         if status.is_success() {
             let claim: Claims = serde_json::from_str(&body_text)
                 .expect("Failed to parse XSTS response");
@@ -713,6 +815,8 @@ impl Bedrock {
 
     pub async fn playfab_login(&mut self, xsts_token: &str, uhs: &str) -> Result<(), Error> {
         let url = "https://20ca2.playfabapi.com/Client/LoginWithXbox";
+
+        // PlayFab token formatı: XBL3.0 x=<uhs>;<xsts_token>
         let xbox_token = format!("XBL3.0 x={};{}", uhs, xsts_token);
 
         let body = PlayFabLoginRequest {
@@ -720,6 +824,12 @@ impl Bedrock {
             create_account: true,
             xbox_token,
         };
+
+        if self.debug {
+            println!("\n=== PLAYFAB LOGIN ===");
+            println!("Xbox User ID: {}", uhs);
+            println!("XSTS Token (first 50): {}", &xsts_token[..50.min(xsts_token.len())]);
+        }
 
         let resp = self
             .client
@@ -732,6 +842,12 @@ impl Bedrock {
         let status = resp.status();
         let body_text = resp.text().await.unwrap_or_default();
 
+        if self.debug {
+            println!("Status: {}", status);
+            println!("Response: {}", body_text);
+            println!("====================\n");
+        }
+
         if status.is_success() {
             let parsed: PlayFabLoginResponse = serde_json::from_str(&body_text)
                 .expect("Failed to parse PlayFab response");
@@ -739,6 +855,7 @@ impl Bedrock {
 
             if self.debug {
                 println!("PlayFab Login Successful");
+                println!("Session Ticket: {}", parsed.data.session_ticket);
             }
             Ok(())
         } else {
@@ -749,8 +866,12 @@ impl Bedrock {
     pub async fn session_start(&mut self, playfab_title_id: &str, device_id: &str) -> Result<(), Error> {
         let url = "https://authorization.franchise.minecraft-services.net/api/v1.0/session/start";
 
-        let session_ticket = self.playfab_session_ticket.clone()
-            .expect("No PlayFab session ticket");
+        let session_ticket = match &self.playfab_session_ticket {
+            Some(ticket) => ticket.clone(),
+            None => {
+                panic!("No PlayFab session ticket");
+            }
+        };
 
         let device = SessionStartRequestDevice {
             application_type: "MinecraftPE",
@@ -787,6 +908,13 @@ impl Bedrock {
         let status = resp.status();
         let body_text = resp.text().await.unwrap_or_default();
 
+        if self.debug {
+            println!("\n=== SESSION START ===");
+            println!("Status: {}", status);
+            println!("Response: {}", body_text);
+            println!("====================\n");
+        }
+
         if status.is_success() {
             let parsed: SessionStartResult = serde_json::from_str(&body_text).unwrap();
             let auth_header = parsed.result.authorization_header;
@@ -806,7 +934,12 @@ impl Bedrock {
     pub async fn multiplayer_session_start(&mut self, public_key_base64: &str) -> Result<(), Error> {
         let url = "https://authorization.franchise.minecraft-services.net/api/v1.0/multiplayer/session/start";
 
-        let mc_token = self.mc_token.clone().expect("No MC token");
+        let mc_token = match &self.mc_token {
+            Some(t) => t.clone(),
+            None => {
+                panic!("No MC token");
+            }
+        };
 
         let mut headers = HeaderMap::new();
         headers.insert(AUTHORIZATION, HeaderValue::from_str(&mc_token).unwrap());
@@ -835,9 +968,11 @@ impl Bedrock {
             panic!("Multiplayer session start failed: {}", body_text);
         }
     }
+
 }
 
-pub fn sign(endpoint: &str, body: &str, signing_key: &SigningKey) -> String {
+
+pub fn sign(endpoint: &str, body: &str, key: &PKey<Private>) -> Result<String, ErrorStack> {
     let current_time = (Utc::now().timestamp() as u64 + 11644473600) * 10000000;
 
     let mut buf = Vec::new();
@@ -859,17 +994,13 @@ pub fn sign(endpoint: &str, body: &str, signing_key: &SigningKey) -> String {
     buf.extend_from_slice(body.as_bytes());
     buf.push(0);
 
-    // Create SHA-256 digest
-    let mut digest = Sha256::new();
-    digest.update(&buf);
+    let mut signer = Signer::new(openssl::hash::MessageDigest::sha256(), &key).expect("Signer not created");
+    signer.update(&buf)?;
+    let signature = signer.sign_to_vec().expect("Signature not created");
 
-    // Sign the Digest
-    let signature: Signature = signing_key.sign_digest(digest);
-    let sig_bytes = signature.to_bytes();
-
-    // Separate the R and S values (each 32 bytes)
-    let r_bytes = &sig_bytes[..32];
-    let s_bytes = &sig_bytes[32..64];
+    let ecdsa = EcdsaSig::from_der(&signature)?;
+    let r = ecdsa.r().to_vec();
+    let s = ecdsa.s().to_vec();
 
     let mut result = Vec::new();
     result.push(0);
@@ -877,56 +1008,17 @@ pub fn sign(endpoint: &str, body: &str, signing_key: &SigningKey) -> String {
     result.push(0);
     result.push(1);
     result.extend_from_slice(&current_time.to_be_bytes());
-    result.extend_from_slice(r_bytes);
-    result.extend_from_slice(s_bytes);
+    result.extend_from_slice(&r);
+    result.extend_from_slice(&s);
 
-    BASE64.encode(&result)
+    Ok(encode_block(&result))
 }
 
-// Convert the P-384 public key to SubjectPublicKeyInfo (SPKI) format
-fn spki_encode_p384(encoded_point: &EncodedPoint384) -> Vec<u8> {
-    // OID for id-ecPublicKey: 1.2.840.10045.2.1
-    let ec_public_key_oid = [0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01];
+pub fn pem_to_der(pem_data: &[u8]) -> Result<Vec<u8>, Box<dyn StdError>> {
+    let pem_str = String::from_utf8(pem_data.to_vec())?;
+    let lines: Vec<&str> = pem_str.lines().filter(|&line| !line.starts_with("-----")).collect();
+    let base64_data = lines.join("");
 
-    // OID for secp384r1: 1.3.132.0.34
-    let secp384r1_oid = [0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22];
-
-    let point_bytes = encoded_point.as_bytes();
-
-    let mut spki = Vec::new();
-
-    // SEQUENCE
-    spki.push(0x30);
-
-    // Algorithm Identifier SEQUENCE content
-    let mut algorithm_identifier = Vec::new();
-    algorithm_identifier.extend_from_slice(&ec_public_key_oid);
-    algorithm_identifier.extend_from_slice(&secp384r1_oid);
-
-    // Subject Public Key (BIT STRING)
-    let mut subject_public_key = Vec::new();
-    subject_public_key.push(0x03); // BIT STRING
-    subject_public_key.push((point_bytes.len() + 1) as u8);
-    subject_public_key.push(0x00); // Unused bits
-    subject_public_key.extend_from_slice(point_bytes);
-
-    // Algorithm Identifier (SEQUENCE)
-    let mut algo_seq = Vec::new();
-    algo_seq.push(0x30); // SEQUENCE
-    algo_seq.push(algorithm_identifier.len() as u8);
-    algo_seq.extend_from_slice(&algorithm_identifier);
-
-    let total_len = algo_seq.len() + subject_public_key.len();
-
-    if total_len < 128 {
-        spki.push(total_len as u8);
-    } else {
-        spki.push(0x81);
-        spki.push(total_len as u8);
-    }
-
-    spki.extend_from_slice(&algo_seq);
-    spki.extend_from_slice(&subject_public_key);
-
-    spki
+    let der_data = decode_block(&base64_data)?;
+    Ok(der_data)
 }
