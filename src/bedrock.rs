@@ -412,7 +412,7 @@ impl Bedrock {
         self.signed_token.clone()
     }
 
-    pub async fn oauth20_connect(&self) -> Result<(Option<OAuth20Connect>, Option<ErrorResponse>), Error> {
+    async fn oauth20_connect(&self) -> Result<(Option<OAuth20Connect>, Option<ErrorResponse>), Error> {
         let mut body = HashMap::new();
         body.insert("client_id", self.client_id);
         body.insert("scope", "service::user.auth.xboxlive.com::MBI_SSL");
@@ -468,7 +468,7 @@ impl Bedrock {
         }
     }
 
-    pub async fn oauth20_token(&self, device_code: String) -> Result<(Option<OAuth20Token>, Option<ErrorResponse>), Error> {
+    async fn oauth20_token(&self, device_code: String) -> Result<(Option<OAuth20Token>, Option<ErrorResponse>), Error> {
         let mut body = HashMap::new();
         body.insert("client_id", self.client_id);
         body.insert("grant_type", "urn:ietf:params:oauth:grant-type:device_code");
@@ -511,7 +511,7 @@ impl Bedrock {
         }
     }
 
-    pub async fn device_auth(&self, signing_key: &SigningKey, x_b64: String, y_b64: String) -> Result<(Option<Claims>, Option<ErrorResponse>), Error> {
+    async fn device_auth(&self, signing_key: &SigningKey, x_b64: String, y_b64: String) -> Result<(Option<Claims>, Option<ErrorResponse>), Error> {
         let body = json!({
             "Properties": {
                 "AuthMethod": "ProofOfPossession",
@@ -568,7 +568,7 @@ impl Bedrock {
         }
     }
 
-    pub async fn sisu_authorize(&self, signing_key: &SigningKey, access_token: String, device_token: String, x_b64: String, y_b64: String) -> Result<(Option<TokenData>, Option<ErrorResponse>), Error> {
+    async fn sisu_authorize(&self, signing_key: &SigningKey, access_token: String, device_token: String, x_b64: String, y_b64: String) -> Result<(Option<TokenData>, Option<ErrorResponse>), Error> {
         let body = json!({
             "AccessToken": format!("t={}", access_token),
             "AppId": self.client_id,
@@ -623,7 +623,7 @@ impl Bedrock {
         }
     }
 
-    pub async fn minecraft_authentication(&mut self, xbox_user_id: String, authorization_token: String) -> Result<(Option<ChainData>, Option<ErrorResponse>), Error> {
+    async fn minecraft_authentication(&mut self, xbox_user_id: String, authorization_token: String) -> Result<(Option<ChainData>, Option<ErrorResponse>), Error> {
         // Create P-384 key pair again
         let signing_key = SigningKey384::random(&mut OsRng);
         self.signing_key_384 = Some(signing_key.clone());
@@ -674,7 +674,7 @@ impl Bedrock {
         }
     }
 
-    pub async fn get_xsts_token_for_playfab(&self, user_token: String) -> Result<(String, String), Error> {
+    async fn get_xsts_token_for_playfab(&self, user_token: String) -> Result<(String, String), Error> {
         let body = json!({
             "Properties": {
                 "SandboxId": "RETAIL",
@@ -711,7 +711,7 @@ impl Bedrock {
         }
     }
 
-    pub async fn playfab_login(&mut self, xsts_token: &str, uhs: &str) -> Result<(), Error> {
+    async fn playfab_login(&mut self, xsts_token: &str, uhs: &str) -> Result<(), Error> {
         let url = "https://20ca2.playfabapi.com/Client/LoginWithXbox";
         let xbox_token = format!("XBL3.0 x={};{}", uhs, xsts_token);
 
@@ -746,7 +746,7 @@ impl Bedrock {
         }
     }
 
-    pub async fn session_start(&mut self, playfab_title_id: &str, device_id: &str) -> Result<(), Error> {
+    async fn session_start(&mut self, playfab_title_id: &str, device_id: &str) -> Result<(), Error> {
         let url = "https://authorization.franchise.minecraft-services.net/api/v1.0/session/start";
 
         let session_ticket = self.playfab_session_ticket.clone()
@@ -803,7 +803,7 @@ impl Bedrock {
         }
     }
 
-    pub async fn multiplayer_session_start(&mut self, public_key_base64: &str) -> Result<(), Error> {
+    async fn multiplayer_session_start(&mut self, public_key_base64: &str) -> Result<(), Error> {
         let url = "https://authorization.franchise.minecraft-services.net/api/v1.0/multiplayer/session/start";
 
         let mc_token = self.mc_token.clone().expect("No MC token");
@@ -837,7 +837,7 @@ impl Bedrock {
     }
 }
 
-pub fn sign(endpoint: &str, body: &str, signing_key: &SigningKey) -> String {
+fn sign(endpoint: &str, body: &str, signing_key: &SigningKey) -> String {
     let current_time = (Utc::now().timestamp() as u64 + 11644473600) * 10000000;
 
     let mut buf = Vec::new();
