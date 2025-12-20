@@ -74,7 +74,6 @@ pub struct TokenData {
     user_token: Claims,
     authorization_token: Claims,
     web_page: String,
-    ucs_migration_response: Value
 }
 
 #[derive(Deserialize)]
@@ -535,7 +534,7 @@ impl Bedrock {
         headers.insert("x-xbl-contract-version", HeaderValue::from_static("1"));
 
         let body_str = body.to_string();
-        let signature = sign("/device/authenticate", &body_str, signing_key);
+        let signature = sign("/device/authenticate", &body_str, None, signing_key);
         headers.insert("Signature", HeaderValue::from_str(&signature).unwrap());
 
         let response = self
@@ -591,7 +590,7 @@ impl Bedrock {
         headers.insert("x-xbl-contract-version", HeaderValue::from_static("1"));
 
         let body_str = body.to_string();
-        let signature = sign("/authorize", &body_str, signing_key);
+        let signature = sign("/authorize", &body_str, None, signing_key);
         headers.insert("Signature", HeaderValue::from_str(&signature).unwrap());
 
         let response = self
@@ -837,50 +836,59 @@ impl Bedrock {
     }
 }
 
-fn sign(endpoint: &str, body: &str, signing_key: &SigningKey) -> String {
-    let current_time = (Utc::now().timestamp() as u64 + 11644473600) * 10000000;
+fn sign(endpoint: &str, body: &str, authorization: Option<&str>, signing_key: &SigningKey) -> String {
+    let current_time = (Utc::now().timestamp() as u64 + 11_644_473_600) * 10_000_000;
 
     let mut buf = Vec::new();
-    buf.push(0);
-    buf.push(0);
-    buf.push(0);
-    buf.push(1);
-    buf.push(0);
 
+    // policy (0,0,0,1) + null
+    buf.extend_from_slice(&[0, 0, 0, 1, 0]);
+
+    // timestamp + null
     buf.extend_from_slice(&current_time.to_be_bytes());
     buf.push(0);
 
+    // method + null
     buf.extend_from_slice(b"POST");
     buf.push(0);
 
+    // path (+query) + null
     buf.extend_from_slice(endpoint.as_bytes());
     buf.push(0);
+
+    // authorization header + null
+    if let Some(auth) = authorization {
+        buf.extend_from_slice(auth.as_bytes());
+    }
     buf.push(0);
+
+    // body + null
     buf.extend_from_slice(body.as_bytes());
     buf.push(0);
 
-    // Create SHA-256 digest
-    let mut digest = Sha256::new();
-    digest.update(&buf);
+    // SHA256
+    let mut hasher = Sha256::new();
+    hasher.update(&buf);
 
-    // Sign the Digest
-    let signature: Signature = signing_key.sign_digest(digest);
-    let sig_bytes = signature.to_bytes();
+    // ECDSA sign (NO DOUBLE HASH)
+    let signature: Signature = signing_key.sign_digest(hasher);
 
-    // Separate the R and S values (each 32 bytes)
-    let r_bytes = &sig_bytes[..32];
-    let s_bytes = &sig_bytes[32..64];
+    let r = signature.r().to_bytes();
+    let s = signature.s().to_bytes();
 
+    let mut r_pad = [0u8; 32];
+    let mut s_pad = [0u8; 32];
+    r_pad[32 - r.len()..].copy_from_slice(&r);
+    s_pad[32 - s.len()..].copy_from_slice(&s);
+
+    // final payload
     let mut result = Vec::new();
-    result.push(0);
-    result.push(0);
-    result.push(0);
-    result.push(1);
+    result.extend_from_slice(&[0, 0, 0, 1]);
     result.extend_from_slice(&current_time.to_be_bytes());
-    result.extend_from_slice(r_bytes);
-    result.extend_from_slice(s_bytes);
+    result.extend_from_slice(&r_pad);
+    result.extend_from_slice(&s_pad);
 
-    BASE64.encode(&result)
+    BASE64.encode(result)
 }
 
 // Convert the P-384 public key to SubjectPublicKeyInfo (SPKI) format
