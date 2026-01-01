@@ -14,7 +14,7 @@ openssl = ["dep:openssl"]
 [dependencies]
 chrono = "0.4.42"
 base64 = "0.22.1"
-reqwest = { version = "0.12.25", default-features = false, features = ["rustls-tls", "json"] }
+reqwest = { version = "0.13.1", default-features = false, features = ["rustls", "json", "form"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 uuid = { version = "1.19.0", features = ["v4"] }
